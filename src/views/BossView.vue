@@ -54,6 +54,9 @@ const props = withDefaults(defineProps<{
 const backendGenerateRequest = computed<GenerateLevelRequest>(() => props.generateRequest ?? {
   size: 15,
   algorithm: 'dfs',
+  bossConfig: {
+    bossCount: 3,
+  },
 })
 
 const level = ref<BossLevelDefinition | null>(null)

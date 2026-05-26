@@ -16,7 +16,7 @@ import type {
 /**
  * 后端基础地址
  */
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000'
+const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 /**
  * 通用后端响应格式
@@ -63,6 +63,7 @@ export type MazeAlgorithm =
   | 'mst'
   | 'dfs'
   | 'bfs_branch_bound'
+  | 'rl'
 
 /**
  * 资源配置
@@ -79,6 +80,9 @@ export interface ResourceConfig {
 
   /** 陷阱价值，默认 -30 */
   trapValue: number
+
+  /** 难度 */
+  difficulty?: 'easy' | 'normal' | 'hard' | 'expert'
 }
 
 /**
@@ -88,20 +92,11 @@ export interface BossGenerateConfig {
   /** BOSS数量 */
   bossCount: number
 
-  /** 是否放在终点附近 */
-  placeNearEnd: boolean
+  /** 技能数量，默认 2 */
+  skillCount?: number
 
-  /** 距离起点的最小距离 */
-  minDistanceFromStart: number
-
-  /** 可选，手动指定BOSS血量 */
-  hpList?: number[]
-
-  /** 可选，手动指定限定回合数 */
-  minRounds?: number
-
-  /** 可选，手动指定复活金币消耗 */
-  coinConsumption?: number
+  /** 额外回合冗余，默认 2 */
+  roundSlack?: number
 }
 
 /**
@@ -117,16 +112,14 @@ export interface GenerateLevelRequest {
   algorithm: MazeAlgorithm
 
   /** 随机种子，方便复现实验 */
-  seed?: number
+  seed?: number | null
 
   /** 资源配置 */
-  resourceConfig?: ResourceConfig
+  resourceConfig?: ResourceConfig | null
 
   /** BOSS配置 */
-  bossConfig?: BossGenerateConfig
+  bossConfig?: BossGenerateConfig | null
 
-  /** 玩家技能，格式为 [伤害, 冷却] */
-  playerSkills?: [number, number][]
 }
 
 /**
