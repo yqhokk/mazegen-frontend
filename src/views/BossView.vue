@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import BossDeathOverlay from '../components/BossDeathOverlay.vue'
+import BossGameOverOverlay from '../components/BossGameOverOverlay.vue'
 import BossVictoryOverlay from '../components/BossVictoryOverlay.vue'
+import { generateLevel } from '../api/level'
+import type { GenerateLevelRequest } from '../api/level'
 import type { LevelDefinition } from '../types'
-import { generateSkillCards } from '../utils'
-
 import bossCowImg from '../assets/images/boss/boss-cow.png'
 import bossSkeletonImg from '../assets/images/boss/boss-skeleton.png'
 import bossTowerImg from '../assets/images/boss/boss-tower.png'
@@ -15,7 +16,7 @@ import battleBgImg from '../assets/images/boss/battle-bg.png'
 /**
  * BOSS战页面
  *
- * 当前版本是前端静态动画原型，不接后端。
+ * BOSS 数量、血量和技能均按后端 / 关卡配置动态渲染。
  *
  * 规则：
  * 1. BOSS 不攻击玩家；
@@ -24,31 +25,46 @@ import battleBgImg from '../assets/images/boss/battle-bg.png'
  * 4. 每回合只能出一张技能牌；
  * 5. BOSS 按顺序挑战；
  * 6. 未击败过的 BOSS 血量未知；
- * 7. 已击败过的 BOSS 血量可见；
+ * 7. 已击败过的 BOSS 血量可见；a
  * 8. 超过限定回合后，消耗金币原地复活；
  * 9. 复活后从第一个 BOSS 重新开始挑战。
  */
 
-/**
- * 方案2：中等挑战型配置
- */
-const level: LevelDefinition = {
-  maze: [['#', 'S', ' ', 'B', 'E', '#']],
-  B: [25, 40, 55],
-  PlayerSkills: [
-    [6, 0],
-    [12, 1],
-    [18, 3],
-  ],
-  minRouds: 13,
-  CoinConsumption: 5,
+type RawBackendSkill = [number, number] | {
+  name?: string
+  damage?: number
+  cooldown?: number
+  cd?: number
+  desc?: string
+  description?: string
 }
+
+type BossLevelDefinition = Omit<LevelDefinition, 'PlayerSkills'> & {
+  PlayerSkills: RawBackendSkill[]
+}
+
+const props = withDefaults(defineProps<{
+  initialLevel?: BossLevelDefinition
+  generateRequest?: GenerateLevelRequest
+  initialCoins?: number
+}>(), {
+  initialCoins: 10,
+})
+
+const backendGenerateRequest = computed<GenerateLevelRequest>(() => props.generateRequest ?? {
+  size: 15,
+  algorithm: 'dfs',
+})
+
+const level = ref<BossLevelDefinition | null>(null)
+const isLoadingLevel = ref(false)
+const loadError = ref('')
 
 /** 当前回合 */
 const currentRound = ref(1)
 
 /** 当前金币：后续应来自地图阶段拾取金币数 */
-const currentCoins = ref(10)
+const currentCoins = ref(props.initialCoins)
 
 /** 当前挑战轮次 */
 const attempt = ref(1)
@@ -57,7 +73,7 @@ const attempt = ref(1)
 const currentBossIndex = ref(0)
 
 /** 当前 BOSS 的内部剩余血量，仅用于本地演示和动画判断 */
-const currentBossHp = ref(level.B[0])
+const currentBossHp = ref(0)
 
 /** 已经知道真实血量的 BOSS */
 const knownBossIndexes = ref<number[]>([])
@@ -80,56 +96,78 @@ const reviving = ref(false)
 /** 是否显示剧情式死亡 / 复活动画 */
 const showDeathOverlay = ref(false)
 
+/** 是否显示金币不足后的游戏结束动画 */
+const showGameOverOverlay = ref(false)
+
+/** 是否已经进入游戏结束状态 */
+const gameOver = ref(false)
+
 /** 是否显示剧情式胜利结算动画 */
 const showVictoryOverlay = ref(false)
 
-/** 技能当前剩余冷却，下标和 PlayerSkills 对应 */
-const skillCooldowns = ref<number[]>(
-  level.PlayerSkills.map(() => 0),
-)
-
-/** 是否正在生成技能卡牌 */
-const generatingSkillCards = ref(false)
-
-/** 技能卡牌生成错误 */
-const skillCardGenerateError = ref('')
+/** 每击败一组三个 BOSS 后的过场提示 */
+const showDangerTransition = ref(false)
 
 /** 战斗日志：保留给死亡/胜利动画和后续联调，不在页面右侧展示 */
-const logs = ref([
-  '进入 BOSS 群挑战。',
-  'BOSS 将按照顺序依次出现。',
-  '每回合只能释放 1 张技能牌。',
-  `需要在 ${level.minRouds} 回合内击败全部 BOSS。`,
-  `若超时，将消耗 ${level.CoinConsumption} 金币并在当前位置复活。`,
-])
+const logs = ref<string[]>([])
 
-/** BOSS 展示数据 */
-const bosses = computed(() => [
-  {
-    index: 0,
-    title: '第一守卫',
-    name: '角牛幼兽',
-    hp: level.B[0],
-    type: 'cow',
-    image: bossCowImg,
-  },
-  {
-    index: 1,
-    title: '第二守卫',
-    name: '骷髅乞丐骑士',
-    hp: level.B[1],
-    type: 'skeleton',
-    image: bossSkeletonImg,
-  },
-  {
-    index: 2,
-    title: '最终守卫',
-    name: '高塔终末者',
-    hp: level.B[2],
-    type: 'tower',
-    image: bossTowerImg,
-  },
-])
+const roundLimit = computed(() => level.value?.minRouds ?? 0)
+const reviveCoinCost = computed(() => level.value?.CoinConsumption ?? 0)
+
+/** BOSS 展示数据：后端 / 关卡配置 level.B 有几个血量，就自动生成几个 BOSS */
+const bossImages = [bossCowImg, bossSkeletonImg, bossTowerImg]
+const bossTypes = ['cow', 'skeleton', 'tower']
+const bossNames = ['角牛幼兽', '骷髅乞丐', '高塔终结者']
+const maxVisibleBosses = 3
+
+const currentBossGroupStart = computed(() => {
+  return Math.floor(currentBossIndex.value / maxVisibleBosses) * maxVisibleBosses
+})
+
+const bosses = computed(() => {
+  const bossHpList = level.value?.B ?? []
+  const start = currentBossGroupStart.value
+
+  return bossHpList.slice(start, start + maxVisibleBosses).map((hp, visibleIndex) => {
+    const index = start + visibleIndex
+    const imageIndex = index % bossImages.length
+    const typeIndex = index % bossTypes.length
+
+    const scale = 1.12 + visibleIndex * 0.22
+
+    return {
+      index,
+      visibleIndex,
+      name: bossNames[index] || `BOSS`,
+      hp,
+      type: bossTypes[typeIndex],
+      image: bossImages[imageIndex],
+      scale,
+      activeScale: scale * 1.04,
+    }
+  })
+})
+
+/**
+ * 自动计算 BOSS 在背景图右半边的位置。
+ * 1 个：75%。
+ * 2 个：66.67%、83.33%。
+ * n 个：把右半边平均分成 n + 1 份，依次站在分割点。
+ */
+function getBossPositionStyle(visibleIndex: number) {
+  const count = bosses.value.length || 1
+  const leftPercent = 24+((visibleIndex + 1) * 85 ) / (count + 1)
+  const boss = bosses.value[visibleIndex]
+  const scale = boss?.scale ?? 1
+  const activeScale = boss?.activeScale ?? scale * 1.04
+
+  return {
+    left: `${leftPercent}%`,
+    bottom: '-14px',
+    '--boss-scale': String(scale),
+    '--boss-active-scale': String(activeScale),
+  }
+}
 
 type BattleSkill = {
   index: number
@@ -139,37 +177,125 @@ type BattleSkill = {
   desc: string
 }
 
-const defaultSkills: BattleSkill[] = [
-  {
-    index: 0,
-    name: '普通攻击',
-    damage: level.PlayerSkills[0][0],
-    cooldown: level.PlayerSkills[0][1],
-    desc: '稳定输出，无冷却，适合填补空回合。',
-  },
-  {
-    index: 1,
-    name: '重击',
-    damage: level.PlayerSkills[1][0],
-    cooldown: level.PlayerSkills[1][1],
-    desc: '中等伤害，适合快速击败低血量 BOSS。',
-  },
-  {
-    index: 2,
-    name: '爆裂斩',
-    damage: level.PlayerSkills[2][0],
-    cooldown: level.PlayerSkills[2][1],
-    desc: '高伤害，冷却较长，需要合理安排释放时机。',
-  },
-]
+/** 后端 / 关卡配置给几个技能，就渲染几个技能；内容优先使用后端字段 */
+function normalizeBackendSkills(playerSkills: BossLevelDefinition['PlayerSkills']) {
+  return playerSkills.map((rawSkill, index) => {
+    const skill = rawSkill as RawBackendSkill
+    const isArraySkill = Array.isArray(skill)
 
-/** 固定技能栏：每回合只能选择一张技能牌 */
-const skills = ref<BattleSkill[]>(defaultSkills)
+    const damage = isArraySkill
+      ? Number(skill[0] ?? 0)
+      : Number(skill.damage ?? 0)
+
+    const cooldown = isArraySkill
+      ? Number(skill[1] ?? 0)
+      : Number(skill.cooldown ?? skill.cd ?? 0)
+
+    return {
+      index,
+      name: isArraySkill
+        ? `技能 ${index + 1}`
+        : skill.name || `技能 ${index + 1}`,
+      damage,
+      cooldown,
+      desc: isArraySkill
+        ? `造成 ${damage} 点伤害，冷却 ${cooldown} 回合。`
+        : skill.desc || skill.description || `造成 ${damage} 点伤害，冷却 ${cooldown} 回合。`,
+    }
+  })
+}
+
+/** 技能数据：完全跟随后端 / level.PlayerSkills 数组长度变化 */
+const skills = ref<BattleSkill[]>([])
+const skillCooldowns = ref<number[]>(skills.value.map(() => 0))
 const skillListRef = ref<HTMLElement | null>(null)
 
-/** 当前目标文字 */
-const currentTargetText = computed(() => {
-  return `第 ${currentBossIndex.value + 1} 个 BOSS / 共 ${level.B.length} 个`
+function assertBossLevel(rawLevel: LevelDefinition | BossLevelDefinition): BossLevelDefinition {
+  const bossLevel = rawLevel as BossLevelDefinition
+
+  if (!Array.isArray(bossLevel.B) || bossLevel.B.length === 0) {
+    throw new Error('后端返回的 level.B 为空或格式不正确')
+  }
+
+  if (!Array.isArray(bossLevel.PlayerSkills) || bossLevel.PlayerSkills.length === 0) {
+    throw new Error('后端返回的 level.PlayerSkills 为空或格式不正确')
+  }
+
+  if (!Number.isFinite(Number(bossLevel.minRouds))) {
+    throw new Error('后端返回的 level.minRouds 格式不正确')
+  }
+
+  if (!Number.isFinite(Number(bossLevel.CoinConsumption))) {
+    throw new Error('后端返回的 level.CoinConsumption 格式不正确')
+  }
+
+  return {
+    ...bossLevel,
+    B: bossLevel.B.map((hp) => Number(hp)),
+    minRouds: Number(bossLevel.minRouds),
+    CoinConsumption: Number(bossLevel.CoinConsumption),
+  }
+}
+
+function createInitialLogs(bossLevel: BossLevelDefinition) {
+  return [
+    '进入战斗。',
+    'BOSS 将按照顺序依次出现。',
+    '每回合只能释放 1 张技能牌。',
+    `需要在 ${bossLevel.minRouds} 回合内击败全部 BOSS。`,
+    `若超时，将消耗 ${bossLevel.CoinConsumption} 金币并在当前位置复活。`,
+  ]
+}
+
+function resetBattleState(bossLevel: BossLevelDefinition) {
+  currentRound.value = 1
+  attempt.value = 1
+  currentBossIndex.value = 0
+  currentBossHp.value = bossLevel.B[0]
+  knownBossIndexes.value = []
+  defeatedInCurrentAttempt.value = []
+  attackingBossIndex.value = null
+  damagePopup.value = null
+  reviving.value = false
+  showDeathOverlay.value = false
+  showGameOverOverlay.value = false
+  gameOver.value = false
+  showVictoryOverlay.value = false
+  showDangerTransition.value = false
+  skills.value = normalizeBackendSkills(bossLevel.PlayerSkills)
+  skillCooldowns.value = skills.value.map(() => 0)
+  logs.value = createInitialLogs(bossLevel)
+}
+
+function applyBossLevel(rawLevel: LevelDefinition | BossLevelDefinition) {
+  const bossLevel = assertBossLevel(rawLevel)
+  level.value = bossLevel
+  resetBattleState(bossLevel)
+}
+
+async function loadLevelFromBackend() {
+  isLoadingLevel.value = true
+  loadError.value = ''
+
+  try {
+    const response = await generateLevel(backendGenerateRequest.value)
+    applyBossLevel(response.level)
+  } catch (error) {
+    loadError.value = error instanceof Error
+      ? error.message
+      : '无法从后端加载 BOSS 配置'
+  } finally {
+    isLoadingLevel.value = false
+  }
+}
+
+onMounted(() => {
+  if (props.initialLevel) {
+    applyBossLevel(props.initialLevel)
+    return
+  }
+
+  void loadLevelFromBackend()
 })
 
 /** 判断是否是当前 BOSS */
@@ -182,72 +308,25 @@ function isDefeatedInCurrentAttempt(index: number) {
   return defeatedInCurrentAttempt.value.includes(index)
 }
 
-/** 判断血量是否已知 */
-function isKnownBoss(index: number) {
-  return knownBossIndexes.value.includes(index)
+function getBossHpPercent(index: number, hp: number) {
+  if (isDefeatedInCurrentAttempt(index)) {
+    return 0
+  }
+
+  if (isCurrentBoss(index) && knownBossIndexes.value.includes(index)) {
+    return Math.max(0, Math.min(100, (currentBossHp.value / hp) * 100))
+  }
+
+  return 100
 }
 
-/** BOSS 血量显示规则 */
-function getBossHpText(index: number, hp: number) {
-  if (isDefeatedInCurrentAttempt(index)) {
-    return `已击败，血量：${hp}`
-  }
-
-  if (isKnownBoss(index)) {
-    return `已知血量：${hp}`
-  }
-
-  if (isCurrentBoss(index)) {
-    return '血量：?? / ??'
-  }
-
-  return '血量：未知'
-}
-
-/** BOSS 状态文字 */
-function getBossStatusText(index: number) {
-  if (isDefeatedInCurrentAttempt(index)) {
-    return '本轮已击败'
-  }
-
-  if (isCurrentBoss(index)) {
-    return '战斗中'
-  }
-
-  return '等待出现'
+function shouldShowUnknownHp(index: number) {
+  return !knownBossIndexes.value.includes(index) && !isDefeatedInCurrentAttempt(index)
 }
 
 /** 判断技能是否可用 */
 function isSkillAvailable(skillIndex: number) {
   return skillCooldowns.value[skillIndex] === 0
-}
-
-/** 生成杀戮尖塔风格技能卡牌 */
-async function generateSlayTheSpireSkillCards() {
-  generatingSkillCards.value = true
-  skillCardGenerateError.value = ''
-
-  try {
-    const cards = await generateSkillCards({
-      count: 20,
-      theme: '杀戮尖塔',
-    })
-
-    skills.value = cards.map((card, index) => ({
-      index,
-      name: card.name,
-      damage: card.damage,
-      cooldown: card.cooldown,
-      desc: 'AI 生成的杀戮尖塔风格技能卡牌。',
-    }))
-    skillCooldowns.value = cards.map(() => 0)
-  } catch (error) {
-    skillCardGenerateError.value = error instanceof Error
-      ? error.message
-      : '生成技能卡牌失败'
-  } finally {
-    generatingSkillCards.value = false
-  }
 }
 
 function onSkillListWheel(event: WheelEvent) {
@@ -263,6 +342,12 @@ function onSkillListWheel(event: WheelEvent) {
  * usedSkillIndex 表示本回合使用的技能，本回合刚使用的技能不会立刻减少冷却。
  */
 function advanceRound(usedSkillIndex?: number) {
+  const bossLevel = level.value
+
+  if (!bossLevel) {
+    return
+  }
+
   skillCooldowns.value = skillCooldowns.value.map((cooldown, index) => {
     if (index === usedSkillIndex) {
       return cooldown
@@ -271,7 +356,7 @@ function advanceRound(usedSkillIndex?: number) {
     return Math.max(0, cooldown - 1)
   })
 
-  if (currentRound.value < level.minRouds) {
+  if (currentRound.value < bossLevel.minRouds) {
     currentRound.value += 1
     logs.value.unshift(`进入第 ${currentRound.value} 回合。`)
   } else {
@@ -281,6 +366,12 @@ function advanceRound(usedSkillIndex?: number) {
 
 /** 当前 BOSS 被击败后的统一处理 */
 function defeatCurrentBossBySkill(): boolean {
+  const bossLevel = level.value
+
+  if (!bossLevel) {
+    return false
+  }
+
   const index = currentBossIndex.value
 
   if (!knownBossIndexes.value.includes(index)) {
@@ -295,10 +386,25 @@ function defeatCurrentBossBySkill(): boolean {
     `第 ${currentRound.value} 回合：击败第 ${index + 1} 个 BOSS，血量信息已记录。`,
   )
 
-  if (currentBossIndex.value < level.B.length - 1) {
-    currentBossIndex.value += 1
-    currentBossHp.value = level.B[currentBossIndex.value]
-    logs.value.unshift(`进入第 ${currentBossIndex.value + 1} 个 BOSS。`)
+  if (currentBossIndex.value < bossLevel.B.length - 1) {
+    const nextBossIndex = currentBossIndex.value + 1
+    const shouldShowDangerTransition = nextBossIndex % maxVisibleBosses === 0
+
+    if (shouldShowDangerTransition) {
+      showDangerTransition.value = true
+      logs.value.unshift('危险远没有结束。')
+
+      window.setTimeout(() => {
+        currentBossIndex.value = nextBossIndex
+        currentBossHp.value = bossLevel.B[currentBossIndex.value]
+        showDangerTransition.value = false
+        logs.value.unshift(`进入第 ${currentBossIndex.value + 1} 个 BOSS。`)
+      }, 2300)
+    } else {
+      currentBossIndex.value = nextBossIndex
+      currentBossHp.value = bossLevel.B[currentBossIndex.value]
+      logs.value.unshift(`进入第 ${currentBossIndex.value + 1} 个 BOSS。`)
+    }
   } else {
     logs.value.unshift('全部 BOSS 已击败，BOSS 战通过。')
     playVictorySettlement()
@@ -310,6 +416,10 @@ function defeatCurrentBossBySkill(): boolean {
 
 /** 使用技能 */
 function useSkill(skillIndex: number) {
+  if (!level.value || gameOver.value || showDangerTransition.value) {
+    return
+  }
+
   const skill = skills.value[skillIndex]
 
   if (!skill) {
@@ -357,36 +467,47 @@ function useSkill(skillIndex: number) {
 
 /** 超时复活 */
 function mockTimeoutAndRevive() {
-  const canRevive = currentCoins.value >= level.CoinConsumption
+  const bossLevel = level.value
+
+  if (!bossLevel) {
+    return
+  }
+
+  const coinsAfterReviveCost = currentCoins.value - bossLevel.CoinConsumption
+
+  if (coinsAfterReviveCost < 0) {
+    currentCoins.value = coinsAfterReviveCost
+    gameOver.value = true
+    showDeathOverlay.value = false
+    showGameOverOverlay.value = true
+    reviving.value = false
+    logs.value.unshift('金币不足以支付复活消耗，游戏结束。')
+    return
+  }
 
   showDeathOverlay.value = true
   reviving.value = true
 
-  logs.value.unshift(`BOSS 战超过 ${level.minRouds} 回合，本轮挑战失败。`)
+  logs.value.unshift(`BOSS 战超过 ${bossLevel.minRouds} 回合，本轮挑战失败。`)
 
   window.setTimeout(() => {
-    if (canRevive) {
-      currentCoins.value -= level.CoinConsumption
-      logs.value.unshift(`消耗 ${level.CoinConsumption} 金币。`)
-    } else {
-      logs.value.unshift('金币不足，无法复活，关卡失败。')
-    }
+    currentCoins.value = coinsAfterReviveCost
+    logs.value.unshift(`消耗 ${bossLevel.CoinConsumption} 金币。`)
   }, 3400)
 
   window.setTimeout(() => {
-    if (canRevive) {
-      attempt.value += 1
-      currentRound.value = 1
-      currentBossIndex.value = 0
-      currentBossHp.value = level.B[0]
-      defeatedInCurrentAttempt.value = []
+    attempt.value += 1
+    currentRound.value = 1
+    currentBossIndex.value = 0
+    currentBossHp.value = bossLevel.B[0]
+    defeatedInCurrentAttempt.value = []
 
-      skillCooldowns.value = level.PlayerSkills.map(() => 0)
+      skillCooldowns.value = skills.value.map(() => 0)
       damagePopup.value = null
       attackingBossIndex.value = null
+      showDangerTransition.value = false
 
       logs.value.unshift('原地复活，从第 1 个 BOSS 重新开始。')
-    }
 
     showDeathOverlay.value = false
     reviving.value = false
@@ -412,17 +533,51 @@ function playVictorySettlement() {
       backgroundImage: `linear-gradient(rgba(8, 13, 18, 0.08), rgba(8, 13, 18, 0.28)), url(${battleBgImg})`,
     }"
   >
+    <section
+      v-if="isLoadingLevel"
+      class="backend-state-panel"
+    >
+      <h2>正在读取后端关卡配置</h2>
+      <p>BOSS 血量、技能、限定回合和复活金币将全部使用后端返回值。</p>
+    </section>
+
+    <section
+      v-else-if="loadError"
+      class="backend-state-panel error"
+    >
+      <h2>后端配置加载失败</h2>
+      <p>{{ loadError }}</p>
+      <button
+        type="button"
+        @click="loadLevelFromBackend"
+      >
+        重新加载
+      </button>
+    </section>
+
+    <template v-else>
     <BossDeathOverlay
       :show="showDeathOverlay"
-      :coin-cost="level.CoinConsumption"
+      :coin-cost="reviveCoinCost"
     />
+
+    <BossGameOverOverlay :show="showGameOverOverlay" />
 
     <BossVictoryOverlay
       :show="showVictoryOverlay"
       :remaining-coins="currentCoins"
       :used-rounds="currentRound"
-      :limit-rounds="level.minRouds"
+      :limit-rounds="roundLimit"
     />
+
+    <Transition name="danger-transition-fade">
+      <div
+        v-if="showDangerTransition"
+        class="danger-transition"
+      >
+        <span>危险远没有结束</span>
+      </div>
+    </Transition>
 
     <!-- 顶部标题 -->
     <header class="top-bar">
@@ -432,15 +587,7 @@ function playVictorySettlement() {
         <span class="hint">来自地图阶段拾取</span>
       </div>
 
-      <div class="page-title">
-        <h1>BOSS 群挑战</h1>
-        <p>按顺序击败全部 BOSS，每回合只能释放一张技能牌</p>
-      </div>
-
-      <div class="target-status">
-        <span class="small-label">当前目标</span>
-        <strong>{{ currentTargetText }}</strong>
-      </div>
+      <div class="page-title" />
     </header>
 
     <!-- 主战斗区 -->
@@ -449,33 +596,30 @@ function playVictorySettlement() {
       <aside class="side-panel left-panel">
         <div class="round-box">
           <span>回合</span>
-          <strong>{{ currentRound }} / {{ level.minRouds }}</strong>
+          <strong>{{ currentRound }} / {{ roundLimit }}</strong>
         </div>
 
         <div class="info-row">
           <span>限定回合</span>
-          <strong>{{ level.minRouds }}</strong>
+          <strong>{{ roundLimit }}</strong>
         </div>
 
         <div class="info-row">
           <span>复活金币</span>
-          <strong>{{ level.CoinConsumption }}</strong>
+          <strong>{{ reviveCoinCost }}</strong>
         </div>
 
         <div class="info-row">
           <span>挑战轮次</span>
           <strong>第 {{ attempt }} 轮</strong>
         </div>
-
-        <div class="player-card">
-          <div class="player-avatar image-avatar">
-            <img :src="playerImg" alt="AI 玩家" />
-          </div>
-
-          <h2>AI 玩家</h2>
-          <p>无血量设定，仅受回合数限制</p>
-        </div>
       </aside>
+
+      <article class="player-card stage-player">
+        <div class="player-avatar image-avatar">
+          <img :src="playerImg" alt="" />
+        </div>
+      </article>
 
       <!-- 中间 BOSS 区域 -->
       <section class="boss-stage">
@@ -483,6 +627,7 @@ function playVictorySettlement() {
           v-for="boss in bosses"
           :key="boss.index"
           class="boss-unit"
+          :style="getBossPositionStyle(boss.visibleIndex)"
           :class="[
             boss.type,
             {
@@ -508,12 +653,23 @@ function playVictorySettlement() {
             />
           </div>
 
-          <p class="hp-text">
-            {{ getBossHpText(boss.index, boss.hp) }}
-          </p>
-
-          <div class="boss-status">
-            {{ getBossStatusText(boss.index) }}
+          <div
+            class="boss-hp-bar"
+            :class="{
+              unknown: shouldShowUnknownHp(boss.index),
+              empty: isDefeatedInCurrentAttempt(boss.index),
+            }"
+          >
+            <span
+              class="boss-hp-fill"
+              :style="{ width: `${getBossHpPercent(boss.index, boss.hp)}%` }"
+            ></span>
+            <span
+              v-if="shouldShowUnknownHp(boss.index)"
+              class="boss-hp-unknown"
+            >
+              ??
+            </span>
           </div>
         </article>
       </section>
@@ -521,26 +677,6 @@ function playVictorySettlement() {
 
     <!-- 技能卡牌区 -->
     <section class="skill-area">
-      <div class="skill-title">
-        <strong>固定技能栏</strong>
-        <span>每回合只能选择 1 张技能牌</span>
-        <button
-          class="generate-skill-button"
-          type="button"
-          :disabled="generatingSkillCards"
-          @click="generateSlayTheSpireSkillCards"
-        >
-          {{ generatingSkillCards ? '生成中...' : '生成20张尖塔卡牌' }}
-        </button>
-      </div>
-
-      <p
-        v-if="skillCardGenerateError"
-        class="skill-generate-error"
-      >
-        {{ skillCardGenerateError }}
-      </p>
-
       <div
         ref="skillListRef"
         class="skill-list"
@@ -585,19 +721,21 @@ function playVictorySettlement() {
             </template>
           </div>
 
+          <p class="skill-desc">
+            {{ skill.desc }}
+          </p>
         </article>
       </div>
     </section>
+    </template>
   </main>
 </template>
 
 <style scoped>
 .boss-page {
   position: relative;
-  width: 100vw;
-  height: 100vh;
-  padding: 10px 18px 0;
-  box-sizing: border-box;
+  min-height: 100vh;
+  padding: 8px 18px 0;
   color: #f5e6c8;
   background-size: cover;
   background-position: center;
@@ -607,8 +745,6 @@ function playVictorySettlement() {
     "Microsoft YaHei",
     sans-serif;
   overflow: hidden;
-  display: grid;
-  grid-template-rows: 72px minmax(0, 1fr) 285px;
 }
 
 .boss-page::before {
@@ -622,13 +758,88 @@ function playVictorySettlement() {
   opacity: 1;
 }
 
-:global(html),
-:global(body),
-:global(#app) {
-  width: 100%;
-  height: 100%;
+.backend-state-panel {
+  position: relative;
+  z-index: 5;
+  width: min(520px, calc(100% - 32px));
+  margin: 18vh auto 0;
+  padding: 28px;
+  text-align: center;
+  border: 1px solid rgba(213, 174, 99, 0.3);
+  border-radius: 12px;
+  background: rgba(4, 7, 10, 0.62);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(2px);
+}
+
+.backend-state-panel h2 {
+  margin: 0 0 10px;
+  color: #ffe08a;
+  font-size: 24px;
+}
+
+.backend-state-panel p {
   margin: 0;
-  overflow: hidden;
+  color: #e6d6b8;
+  line-height: 1.6;
+}
+
+.backend-state-panel button {
+  margin-top: 18px;
+  padding: 9px 22px;
+  border: 1px solid rgba(228, 183, 104, 0.46);
+  border-radius: 8px;
+  color: #fff0bf;
+  background: rgba(49, 78, 97, 0.82);
+  cursor: pointer;
+}
+
+.backend-state-panel.error {
+  border-color: rgba(226, 97, 83, 0.42);
+}
+
+.danger-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 48%, rgba(154, 25, 22, 0.26), transparent 36%),
+    rgba(0, 0, 0, 0.52);
+  backdrop-filter: blur(2px);
+}
+
+.danger-transition span {
+  display: block;
+  padding: 20px 48px;
+  color: #ffe1c0;
+  border: 2px solid rgba(202, 64, 48, 0.68);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(54, 12, 14, 0.88), rgba(7, 6, 8, 0.9));
+  box-shadow:
+    0 0 42px rgba(202, 42, 34, 0.36),
+    0 22px 50px rgba(0, 0, 0, 0.64);
+  font-size: 44px;
+  font-weight: 900;
+  letter-spacing: 10px;
+  text-shadow:
+    0 0 20px rgba(244, 67, 50, 0.5),
+    0 4px 0 rgba(0, 0, 0, 0.8);
+  animation: dangerTextPulse 1.1s ease-in-out infinite;
+}
+
+.danger-transition-fade-enter-active,
+.danger-transition-fade-leave-active {
+  transition: opacity 0.45s ease;
+}
+
+.danger-transition-fade-enter-from,
+.danger-transition-fade-leave-to {
+  opacity: 0;
 }
 
 /* 顶部 HUD */
@@ -636,15 +847,14 @@ function playVictorySettlement() {
   position: relative;
   z-index: 4;
   display: grid;
-  grid-template-columns: 215px 1fr 260px;
+  grid-template-columns: 215px 1fr;
   align-items: start;
   gap: 18px;
-  height: 72px;
+  height: 78px;
   margin-bottom: 0;
 }
 
-.coin-status,
-.target-status {
+.coin-status {
   min-height: 64px;
   padding: 10px 16px;
   border: 1px solid rgba(213, 174, 99, 0.28);
@@ -660,8 +870,7 @@ function playVictorySettlement() {
   font-size: 13px;
 }
 
-.coin-status strong,
-.target-status strong {
+.coin-status strong {
   display: block;
   margin-top: 2px;
   color: #ffe08a;
@@ -700,12 +909,10 @@ function playVictorySettlement() {
   position: relative;
   z-index: 2;
   display: grid;
-  grid-template-columns: 275px 1fr;
+  grid-template-columns: 1fr;
   gap: 18px;
   align-items: end;
-  height: auto;
-  min-height: 0;
-  overflow: visible;
+  min-height: 640px;
 }
 
 .side-panel {
@@ -719,12 +926,15 @@ function playVictorySettlement() {
 }
 
 .left-panel {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
   overflow: visible;
-  align-self: end;
+  z-index: 6;
+  width: 215px;
+  box-sizing: border-box;
   padding: 10px;
-  margin-left: 50px;
-  margin-bottom: 22px;
+  margin: 0;
   background: rgba(5, 8, 11, 0.20);
   border-color: rgba(209, 169, 94, 0.14);
 }
@@ -767,18 +977,20 @@ function playVictorySettlement() {
 
 .player-card {
   position: absolute;
-  left: calc(100% + 190px);
-  bottom: 8px;
-  width: 230px;
+  left: 25%;
+  bottom: 34px;
+  z-index: 3;
+  width: 190px;
   margin-top: 0;
   text-align: center;
-  transform: none;
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
 .player-avatar {
   position: relative;
-  width: 190px;
-  height: 210px;
+  width: 160px;
+  height: 200px;
   margin: 0 auto 4px;
   border-radius: 50%;
   background: transparent;
@@ -795,47 +1007,35 @@ function playVictorySettlement() {
 }
 
 .image-avatar img {
-  width: 215px;
-  height: 235px;
+  width: 205px;
+  height: 245px;
   object-fit: contain;
   filter:
     drop-shadow(0 24px 26px rgba(0, 0, 0, 0.74))
     drop-shadow(0 0 12px rgba(255, 216, 140, 0.12));
 }
 
-.player-card h2 {
-  margin: 0;
-  color: #f3d28a;
-  font-size: 20px;
-  text-shadow: 0 3px 8px rgba(0, 0, 0, 0.9);
-}
-
-.player-card p {
-  display: none;
-}
-
 /* BOSS 区域 */
 .boss-stage {
-  min-height: 0;
-  height: 100%;
-  display: grid;
-  grid-template-columns: repeat(3, 190px);
-  gap: 16px;
-  justify-content: end;
-  align-items: end;
-  padding: 0 92px 14px 0;
+  position: relative;
+  min-height: 600px;
+  width: min(1120px, 100%);
+  margin-left: auto;
   border-radius: 16px;
   background: transparent;
+  overflow: visible;
 }
 
 .boss-unit {
-  position: relative;
-  min-height: 280px;
+  position: absolute;
+  width: 220px;
+  min-height: 310px;
   padding: 0 4px 6px;
   text-align: center;
   border: none;
   border-radius: 16px;
   background: transparent;
+  transform: translateX(-50%);
   transition:
     transform 0.2s ease,
     opacity 0.2s ease,
@@ -844,15 +1044,15 @@ function playVictorySettlement() {
 }
 
 .boss-unit.active {
-  transform: translateY(-6px);
+  transform: translateX(-50%) translateY(-6px);
   border-color: transparent;
   background: transparent;
   animation: bossBreathing 1.8s ease-in-out infinite;
 }
 
 .boss-unit.locked {
-  opacity: 0.52;
-  filter: grayscale(0.25);
+  opacity: 0.88;
+  filter: none;
 }
 
 .boss-unit.defeated {
@@ -865,7 +1065,7 @@ function playVictorySettlement() {
 
 .boss-figure {
   position: relative;
-  height: 205px;
+  height: 290px;
   margin-top: 0;
   display: flex;
   align-items: flex-end;
@@ -874,13 +1074,15 @@ function playVictorySettlement() {
 
 .boss-image {
   width: 100%;
-  max-width: 168px;
-  height: 205px;
+  max-width: 245px;
+  height: 290px;
   object-fit: contain;
   background: transparent;
   filter:
     drop-shadow(0 22px 24px rgba(0, 0, 0, 0.74))
     drop-shadow(0 0 14px rgba(255, 204, 115, 0.12));
+  transform: scale(var(--boss-scale, 1));
+  transform-origin: bottom center;
   transition:
     transform 0.2s ease,
     filter 0.2s ease,
@@ -890,35 +1092,22 @@ function playVictorySettlement() {
 
 
 .boss-unit.active .boss-image {
-  transform: translateY(-8px) scale(1.04);
-  filter:
-    drop-shadow(0 24px 26px rgba(0, 0, 0, 0.74))
-    drop-shadow(0 0 24px rgba(255, 203, 99, 0.34));
-}
-.boss-unit.tower .boss-image {
-  max-width: 5000px;
-  height: 390px;
- 
-}
-.boss-unit.tower.active .boss-image {
-  transform: translateY(78px) scale(1.45);
+  transform: translateY(-8px) scale(var(--boss-active-scale, 1.04));
   filter:
     drop-shadow(0 24px 26px rgba(0, 0, 0, 0.74))
     drop-shadow(0 0 24px rgba(255, 203, 99, 0.34));
 }
 .boss-unit.locked .boss-image {
-  opacity: 0.68;
+  opacity: 0.78;
   filter:
-    grayscale(0.45)
-    brightness(0.68)
+    brightness(0.82)
     drop-shadow(0 14px 18px rgba(0, 0, 0, 0.58));
 }
 
 .boss-unit.defeated .boss-image {
-  opacity: 0.42;
+  opacity: 0.72;
   filter:
-    grayscale(0.85)
-    brightness(0.65)
+    brightness(0.78)
     drop-shadow(0 12px 18px rgba(0, 0, 0, 0.5));
 }
 
@@ -929,37 +1118,63 @@ function playVictorySettlement() {
   text-shadow: 0 3px 8px rgba(0, 0, 0, 0.9);
 }
 
-.hp-text {
-  margin: 0;
-  color: #e9b2a3;
-  font-size: 14px;
-  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
+.boss-hp-bar {
+  position: relative;
+  width: 156px;
+  height: 13px;
+  margin: 4px auto 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 220, 150, 0.34);
+  border-radius: 999px;
+  background: rgba(9, 11, 13, 0.68);
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.58),
+    inset 0 0 8px rgba(0, 0, 0, 0.72);
 }
 
-.boss-status {
-  margin: 8px auto 0;
-  width: fit-content;
-  padding: 4px 20px;
-  border-radius: 8px;
-  background: rgba(10, 13, 16, 0.46);
-  border: 1px solid rgba(217, 175, 94, 0.2);
-  color: #f0d7a5;
-  font-size: 13px;
+.boss-hp-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, #d03832, #ff7d45 58%, #ffd36c);
+  box-shadow:
+    0 0 10px rgba(255, 89, 56, 0.66),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  transition: width 0.24s ease;
+}
+
+.boss-hp-unknown {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f4dfb8;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  line-height: 1;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.95),
+    0 0 8px rgba(255, 224, 160, 0.22);
+}
+
+.boss-hp-bar.unknown .boss-hp-fill {
+  opacity: 0.28;
+  background: linear-gradient(90deg, #4b5660, #7e8a90);
+  box-shadow: none;
+}
+
+.boss-hp-bar.empty .boss-hp-fill {
+  opacity: 0;
 }
 
 /* 技能区域 */
 .skill-area {
   position: relative;
   z-index: 5;
-  margin: 0 -18px;
-  padding: 8px 18px 0;
-  height: 285px;
-  overflow: hidden;
-  border-top: 1px solid rgba(243, 201, 111, 0.24);
-  background:
-    linear-gradient(180deg, rgba(10, 13, 16, 0.68), rgba(5, 7, 10, 0.88)),
-    radial-gradient(circle at 50% 0%, rgba(255, 188, 84, 0.16), transparent 38%);
-  box-shadow: 0 -18px 30px rgba(0, 0, 0, 0.32);
+  margin-top: 0;
 }
 
 .skill-title {
@@ -967,7 +1182,7 @@ function playVictorySettlement() {
   justify-content: center;
   align-items: center;
   gap: 18px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   color: #d8c7aa;
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
 }
@@ -976,54 +1191,22 @@ function playVictorySettlement() {
   color: #f3d28a;
 }
 
-.generate-skill-button {
-  cursor: pointer;
-  padding: 7px 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(243, 201, 111, 0.64);
-  background: linear-gradient(180deg, #6f4a18, #352415);
-  color: #fff2c6;
-  font-weight: 700;
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28);
-}
-
-.generate-skill-button:disabled {
-  cursor: wait;
-  opacity: 0.68;
-}
-
-.skill-generate-error {
-  width: fit-content;
-  max-width: 640px;
-  margin: 8px auto 0;
-  padding: 7px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 118, 94, 0.5);
-  background: rgba(82, 18, 14, 0.58);
-  color: #ffd2c7;
-  font-size: 13px;
-}
-
 .skill-list {
   display: flex;
   justify-content: flex-start;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: 18px;
-  width: min(1160px, calc(100% - 32px));
-  height: 230px;
-  min-height: 0;
+  width: min(920px, calc(100% - 32px));
+  min-height: 280px;
   margin: 0 auto;
-  padding: 22px 16px 18px;
+  padding: 14px 16px 18px;
   overflow-x: auto;
   overflow-y: hidden;
-  overscroll-behavior: contain;
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
-  transform: none;
-  cursor: default;
+  transform: translateY(28px);
+  cursor: grab;
   user-select: none;
-  mask-image: linear-gradient(90deg, transparent 0, #000 34px, #000 calc(100% - 34px), transparent 100%);
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 34px, #000 calc(100% - 34px), transparent 100%);
 }
 
 .skill-list.dragging {
@@ -1050,12 +1233,11 @@ function playVictorySettlement() {
 
 .skill-card {
   position: relative;
-  flex: 0 0 162px;
-  width: 162px;
-  min-width: 162px;
-  min-height: 172px;
-  padding: 8px;
-  box-sizing: border-box;
+  flex: 0 0 175px;
+  width: 175px;
+  min-width: 175px;
+  min-height: 195px;
+  padding: 10px;
   border-radius: 12px;
   border: 1px solid rgba(221, 181, 105, 0.56);
   background: linear-gradient(180deg, #202b2f 0%, #151b1e 100%);
@@ -1078,7 +1260,7 @@ function playVictorySettlement() {
 
 .skill-card:hover {
   animation: none;
-  transform: translateY(-6px);
+  transform: translateY(-10px);
   box-shadow:
     0 20px 32px rgba(0, 0, 0, 0.38),
     0 0 18px rgba(245, 196, 103, 0.18);
@@ -1098,13 +1280,13 @@ function playVictorySettlement() {
 
 .skill-index {
   position: absolute;
-  top: -10px;
-  left: -10px;
-  width: 32px;
-  height: 32px;
+  top: -13px;
+  left: -13px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   background: #314e61;
-  border: 2px solid #d9b66b;
+  border: 3px solid #d9b66b;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1113,14 +1295,13 @@ function playVictorySettlement() {
 }
 
 .skill-card h3 {
-  margin: 2px 0 7px;
+  margin: 4px 0 10px;
   text-align: center;
   color: #f4d48c;
-  font-size: 16px;
 }
 
 .card-art {
-  height: 50px;
+  height: 66px;
   border-radius: 8px;
   border: 1px solid rgba(221, 181, 105, 0.4);
   background:
@@ -1139,10 +1320,9 @@ function playVictorySettlement() {
 }
 
 .skill-meta {
-  margin-top: 7px;
+  margin-top: 10px;
   color: #f2e2c2;
-  line-height: 1.35;
-  font-size: 13px;
+  line-height: 1.5;
 }
 
 .skill-meta p {
@@ -1150,20 +1330,27 @@ function playVictorySettlement() {
 }
 
 .skill-state {
-  margin-top: 7px;
-  padding: 5px 10px;
+  margin-top: 10px;
+  padding: 6px 10px;
   text-align: center;
   border-radius: 8px;
   background: rgba(57, 102, 65, 0.52);
   border: 1px solid rgba(129, 218, 122, 0.34);
   color: #d9ffd0;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .skill-state.cooling {
   background: rgba(111, 42, 36, 0.58);
   border-color: rgba(226, 97, 83, 0.38);
   color: #ffd1c7;
+}
+
+.skill-desc {
+  margin: 8px 0 0;
+  color: #9fb2b7;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* 伤害飘字 */
@@ -1198,28 +1385,45 @@ function playVictorySettlement() {
   }
 }
 
+@keyframes dangerTextPulse {
+  0% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+
+  50% {
+    transform: scale(1.04);
+    filter: brightness(1.18);
+  }
+
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
 /* 动画：BOSS 受击 */
 @keyframes bossHit {
   0% {
-    transform: translateY(-6px) translateX(0);
+    transform: translateX(-50%) translateY(-6px);
     filter: brightness(1);
   }
 
   20% {
-    transform: translateY(-6px) translateX(-8px);
+    transform: translateX(calc(-50% - 8px)) translateY(-6px);
     filter: brightness(1.5);
   }
 
   45% {
-    transform: translateY(-6px) translateX(8px);
+    transform: translateX(calc(-50% + 8px)) translateY(-6px);
   }
 
   70% {
-    transform: translateY(-6px) translateX(-4px);
+    transform: translateX(calc(-50% - 4px)) translateY(-6px);
   }
 
   100% {
-    transform: translateY(-6px) translateX(0);
+    transform: translateX(-50%) translateY(-6px);
     filter: brightness(1);
   }
 }
@@ -1306,22 +1510,24 @@ function playVictorySettlement() {
   }
 
   .player-card {
-    transform: none;
+    left: 25%;
+    bottom: 34px;
+    transform: translateX(-50%);
   }
 
   .boss-stage {
-    grid-template-columns: 1fr;
-    padding: 0;
+    min-height: 520px;
+  }
+
+  .boss-unit {
+    width: 170px;
   }
 
   .boss-unit.active,
   .boss-unit.hit {
-    transform: none;
+    transform: translateX(-50%) translateY(-6px);
   }
 
-  .boss-order {
-    margin: 12px 0;
-  }
 
   .skill-list {
     flex-wrap: wrap;

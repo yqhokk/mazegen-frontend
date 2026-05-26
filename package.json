@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "backend": "node backend/simple-level-server.mjs",
     "test": "vitest run",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
