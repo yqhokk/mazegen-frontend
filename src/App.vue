@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import DefaultLayout from "./layouts/DefaultLayout.vue";
-import HomeView from "./views/HomeView.vue";
+import DefaultLayout from './layouts/DefaultLayout.vue'
+import BossView from './views/BossView.vue'
 </script>
 
 <template>
   <DefaultLayout>
-    <HomeView />
+    <BossView />
   </DefaultLayout>
-</template>
+    </template>
