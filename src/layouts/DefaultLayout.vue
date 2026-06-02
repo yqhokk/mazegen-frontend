@@ -2,6 +2,8 @@
 defineProps<{
   page: 'home' | 'config' | 'maze' | 'boss'
   title: string
+  navigationLocked?: boolean
+  bossDisabled?: boolean
 }>()
 
 defineEmits<{
@@ -13,9 +15,10 @@ defineEmits<{
   <main class="default-layout">
     <header class="app-shell-header">
       <button
-        type="button"
-        class="brand"
-        @click="$emit('navigate', 'home')"
+          type="button"
+          class="brand"
+          :disabled="navigationLocked"
+          @click="$emit('navigate', 'home')"
       >
         MazeGen
       </button>
@@ -23,6 +26,7 @@ defineEmits<{
         <button
           type="button"
           :class="{ active: page === 'home' }"
+          :disabled="navigationLocked"
           @click="$emit('navigate', 'home')"
         >
           目录
@@ -30,6 +34,7 @@ defineEmits<{
         <button
           type="button"
           :class="{ active: page === 'config' }"
+          :disabled="navigationLocked"
           @click="$emit('navigate', 'config')"
         >
           配置关卡
@@ -37,6 +42,7 @@ defineEmits<{
         <button
           type="button"
           :class="{ active: page === 'maze' }"
+          :disabled="navigationLocked"
           @click="$emit('navigate', 'maze')"
         >
           迷宫
@@ -44,6 +50,7 @@ defineEmits<{
         <button
           type="button"
           :class="{ active: page === 'boss' }"
+          :disabled="navigationLocked || bossDisabled"
           @click="$emit('navigate', 'boss')"
         >
           Boss 战
@@ -109,6 +116,18 @@ nav button:hover {
   color: #fff7ed;
   background: rgba(245, 158, 11, 0.2);
   border-color: rgba(251, 191, 36, 0.38);
+}
+
+.brand:disabled,
+nav button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+nav button:disabled:hover {
+  color: rgba(226, 232, 240, 0.76);
+  background: transparent;
+  border-color: transparent;
 }
 
 .current-title {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import BossDeathOverlay from '../components/BossDeathOverlay.vue'
 import BossGameOverOverlay from '../components/BossGameOverOverlay.vue'
 import BossVictoryOverlay from '../components/BossVictoryOverlay.vue'
@@ -11,7 +11,7 @@ import bossSkeletonImg from '../assets/images/boss/boss-skeleton.png'
 import bossTowerImg from '../assets/images/boss/boss-tower.png'
 import playerImg from '../assets/images/boss/player.png'
 import skillSlashImg from '../assets/images/boss/skill-slash.png'
-import battleBgImg from '../assets/images/boss/battle-bg.png'
+import battleBgImg from '../assets/images/maze/road1.png'
 
 /**
  * BOSS战页面
@@ -50,6 +50,11 @@ const props = withDefaults(defineProps<{
 }>(), {
   initialCoins: 10,
 })
+
+const emit = defineEmits<{
+  cleared: [{ remainingCoins: number }]
+  gameOver: []
+}>()
 
 const backendGenerateRequest = computed<GenerateLevelRequest>(() => props.generateRequest ?? {
   size: 15,
@@ -113,6 +118,7 @@ const showDangerTransition = ref(false)
 
 /** 战斗日志：保留给死亡/胜利动画和后续联调，不在页面右侧展示 */
 const logs = ref<string[]>([])
+let outcomeTimer: ReturnType<typeof setTimeout> | undefined
 
 const roundLimit = computed(() => level.value?.minRouds ?? 0)
 const reviveCoinCost = computed(() => level.value?.CoinConsumption ?? 0)
@@ -251,6 +257,7 @@ function createInitialLogs(bossLevel: BossLevelDefinition) {
 }
 
 function resetBattleState(bossLevel: BossLevelDefinition) {
+  currentCoins.value = props.initialCoins
   currentRound.value = 1
   attempt.value = 1
   currentBossIndex.value = 0
@@ -299,6 +306,10 @@ onMounted(() => {
   }
 
   void loadLevelFromBackend()
+})
+
+onBeforeUnmount(() => {
+  clearTimeout(outcomeTimer)
 })
 
 /** 判断是否是当前 BOSS */
@@ -478,13 +489,17 @@ function mockTimeoutAndRevive() {
 
   const coinsAfterReviveCost = currentCoins.value - bossLevel.CoinConsumption
 
-  if (coinsAfterReviveCost < 0) {
+  if (coinsAfterReviveCost <= 0) {
     currentCoins.value = coinsAfterReviveCost
     gameOver.value = true
     showDeathOverlay.value = false
     showGameOverOverlay.value = true
     reviving.value = false
     logs.value.unshift('金币不足以支付复活消耗，游戏结束。')
+    clearTimeout(outcomeTimer)
+    outcomeTimer = window.setTimeout(() => {
+      emit('gameOver')
+    }, 6200)
     return
   }
 
@@ -517,13 +532,36 @@ function mockTimeoutAndRevive() {
   }, 6200)
 }
 
+/** 放弃挑战，强制按失败流程退出到迷宫初始状态 */
+function abandonBattle() {
+  if (gameOver.value || showVictoryOverlay.value) {
+    return
+  }
+
+  gameOver.value = true
+  reviving.value = false
+  showDeathOverlay.value = false
+  showDangerTransition.value = false
+  showGameOverOverlay.value = true
+  damagePopup.value = null
+  attackingBossIndex.value = null
+  logs.value.unshift('玩家放弃 BOSS 战，强制退出并重开迷宫。')
+
+  clearTimeout(outcomeTimer)
+  outcomeTimer = window.setTimeout(() => {
+    emit('gameOver')
+  }, 900)
+}
+
 /** 播放胜利结算动画 */
 function playVictorySettlement() {
   showVictoryOverlay.value = true
   logs.value.unshift('BOSS 群已被击败，进入胜利结算。')
 
-  window.setTimeout(() => {
+  clearTimeout(outcomeTimer)
+  outcomeTimer = window.setTimeout(() => {
     showVictoryOverlay.value = false
+    emit('cleared', { remainingCoins: currentCoins.value })
   }, 7000)
 }
 </script>
@@ -533,7 +571,9 @@ function playVictorySettlement() {
     class="boss-page"
     :class="{ reviving }"
     :style="{
-      backgroundImage: `linear-gradient(rgba(8, 13, 18, 0.08), rgba(8, 13, 18, 0.28)), url(${battleBgImg})`,
+      backgroundImage: `linear-gradient(rgba(8, 13, 18, 0.55), rgba(8, 13, 18, 0.55)), url(${battleBgImg})`,
+      backgroundSize: 'auto',
+      backgroundRepeat: 'repeat',
     }"
   >
     <section
@@ -591,6 +631,15 @@ function playVictorySettlement() {
       </div>
 
       <div class="page-title" />
+
+      <button
+        type="button"
+        class="abandon-btn"
+        :disabled="gameOver || showVictoryOverlay"
+        @click="abandonBattle"
+      >
+        放弃
+      </button>
     </header>
 
     <!-- 主战斗区 -->
@@ -673,6 +722,12 @@ function playVictorySettlement() {
             >
               ??
             </span>
+            <span
+              v-else-if="!isDefeatedInCurrentAttempt(boss.index)"
+              class="boss-hp-value"
+            >
+              {{ isCurrentBoss(boss.index) ? currentBossHp : boss.hp }} / {{ boss.hp }}
+            </span>
           </div>
         </article>
       </section>
@@ -740,9 +795,8 @@ function playVictorySettlement() {
   min-height: 100vh;
   padding: 8px 18px 0;
   color: #f5e6c8;
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
+  background-size: auto;
+  background-repeat: repeat;
   font-family:
     Inter,
     "Microsoft YaHei",
@@ -850,7 +904,7 @@ function playVictorySettlement() {
   position: relative;
   z-index: 4;
   display: grid;
-  grid-template-columns: 215px 1fr;
+  grid-template-columns: 215px 1fr 92px;
   align-items: start;
   gap: 18px;
   height: 78px;
@@ -905,6 +959,29 @@ function playVictorySettlement() {
   color: #e6d6b8;
   font-size: 13px;
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
+}
+
+.abandon-btn {
+  justify-self: end;
+  min-width: 82px;
+  height: 38px;
+  border: 1px solid rgba(226, 97, 83, 0.48);
+  border-radius: 8px;
+  color: #ffe1d6;
+  background: rgba(96, 24, 20, 0.76);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.abandon-btn:hover:not(:disabled) {
+  background: rgba(134, 35, 28, 0.86);
+  border-color: rgba(255, 154, 130, 0.62);
+}
+
+.abandon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 /* 主战斗舞台 */
@@ -1161,6 +1238,22 @@ function playVictorySettlement() {
   text-shadow:
     0 1px 3px rgba(0, 0, 0, 0.95),
     0 0 8px rgba(255, 224, 160, 0.22);
+}
+
+.boss-hp-value {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.95),
+    0 0 6px rgba(0, 0, 0, 0.8);
 }
 
 .boss-hp-bar.unknown .boss-hp-fill {
