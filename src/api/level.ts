@@ -6,6 +6,7 @@
 import type {
   LevelDefinition,
   Position,
+  GridCoord,
   Resource,
   PlanBossFightResponse,
   AgentRuntimeState,
@@ -81,8 +82,6 @@ export interface ResourceConfig {
   /** 陷阱价值，默认 -30 */
   trapValue: number
 
-  /** 难度 */
-  difficulty?: 'easy' | 'normal' | 'hard' | 'expert'
 }
 
 /**
@@ -95,8 +94,20 @@ export interface BossGenerateConfig {
   /** 技能数量，默认 2 */
   skillCount?: number
 
+  /** 技能最大冷却，默认 8 */
+  skillCooldownMax?: number
+
   /** 额外回合冗余，默认 2 */
   roundSlack?: number
+
+  /** 单次挑战最少回合 */
+  localAttemptMin?: number | null
+
+  /** 单次挑战最多回合 */
+  localAttemptMax?: number | null
+
+  /** 尝试搜索次数，默认 100 */
+  attemptSearchTries?: number
 }
 
 /**
@@ -168,14 +179,34 @@ export interface ValidateLevelResponse {
 export type SolveTask = 'resource' | 'boss' | 'all'
 
 /**
+ * 资源路径求解模式
+ */
+export type ResourceMode =
+  | 'score_per_step'
+  | 'max_resource'
+  | 'max_resource_anywhere'
+
+/**
  * 资源路径求解结果
  */
 export interface ResourceSolveResult {
   /** 最大资源价值 */
   maxValue: number
 
+  /** 路径步数 */
+  stepCount: number
+
+  /** 单步平均得分 */
+  scorePerStep: number
+
+  /** 收集到的资源数量 */
+  collectedCount: number
+
+  /** 主路径 */
+  mainPath: GridCoord[]
+
   /** 最优路径 */
-  path: Position[]
+  path: GridCoord[]
 
   /** 收集到的资源 */
   collectedResources: Resource[]
@@ -191,6 +222,9 @@ export interface SolveLevelRequest {
 
   /** resource: 只求资源路径；boss: 只求BOSS；all: 全部求解 */
   task: SolveTask
+
+  /** 资源求解模式，后端默认 score_per_step */
+  resourceMode?: ResourceMode
 }
 
 /**

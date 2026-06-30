@@ -12,7 +12,6 @@ type LevelConfigForm = {
   trapRatio: number
   coinValue: number
   trapValue: number
-  difficulty: 'easy' | 'normal' | 'hard' | 'expert'
   bossCount: number
   skillCount: number
   roundSlack: number
@@ -35,7 +34,6 @@ const form = reactive<LevelConfigForm>({
   trapRatio: props.modelValue.resourceConfig?.trapRatio ?? 0.15,
   coinValue: props.modelValue.resourceConfig?.coinValue ?? 50,
   trapValue: props.modelValue.resourceConfig?.trapValue ?? -30,
-  difficulty: props.modelValue.resourceConfig?.difficulty ?? 'normal',
   bossCount: props.modelValue.bossConfig?.bossCount ?? 3,
   skillCount: props.modelValue.bossConfig?.skillCount ?? 2,
   roundSlack: props.modelValue.bossConfig?.roundSlack ?? 2,
@@ -78,7 +76,6 @@ function buildRequest(): GenerateLevelRequest {
       trapRatio: clamp01(form.trapRatio),
       coinValue: Math.round(Number(form.coinValue) || 0),
       trapValue: Math.round(Number(form.trapValue) || 0),
-      difficulty: form.difficulty,
     },
     bossConfig: {
       bossCount: Math.max(1, Math.round(Number(form.bossCount) || 1)),
@@ -160,16 +157,6 @@ function applyConfig(target: AppPage = 'maze') {
           <label>
             <span>陷阱价值</span>
             <input v-model.number="form.trapValue" type="number">
-          </label>
-
-          <label>
-            <span>难度</span>
-            <select v-model="form.difficulty">
-              <option value="easy">简单</option>
-              <option value="normal">普通</option>
-              <option value="hard">困难</option>
-              <option value="expert">专家</option>
-            </select>
           </label>
         </fieldset>
 

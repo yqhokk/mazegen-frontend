@@ -23,7 +23,7 @@ import {
 } from 'vue'
 import { generateLevel, solveLevel } from '../api/level'
 import type { GenerateLevelRequest, SolveLevelResponse } from '../api/level'
-import type { LevelDefinition, Position, Resource } from '../types'
+import type { GridCoord, LevelDefinition, Position, Resource } from '../types'
 import BossGameOverOverlay from '../components/BossGameOverOverlay.vue'
 import MazeGrid from '../components/MazeGrid.vue'
 import type { FloatingEffect } from '../components/MazeGrid.vue'
@@ -80,13 +80,18 @@ const showPathDebug = ref(false)
 const resourceResult = computed(() => solveResult.value?.resource ?? null)
 
 /**
- * 后端返回的最优路径
- * 后端坐标约定：x = 行(row)，y = 列(col)
+ * 后端返回的最优路径。
+ * 新接口路径坐标约定：[row, col]
  * 前端坐标约定：x = 列(col)，y = 行(row)
  * 这里在入口处统一转置，后续所有代码均使用前端约定
  */
+function backendCoordToPosition(coord: GridCoord): Position {
+  const [row, col] = coord
+  return { x: col, y: row }
+}
+
 const solvePath = computed<Position[]>(() =>
-  (resourceResult.value?.path ?? []).map(p => ({ x: p.y, y: p.x }))
+  (resourceResult.value?.path ?? []).map(backendCoordToPosition)
 )
 
 const mazePath = computed<Position[]>(() => solvePath.value)
@@ -332,7 +337,11 @@ async function generate() {
 async function solve(lv: LevelDefinition) {
   isSolving.value = true
   try {
-    const res = await solveLevel({ level: lv, task: 'all' })
+    const res = await solveLevel({
+      level: lv,
+      task: 'all',
+      resourceMode: 'score_per_step',
+    })
     solveResult.value = res
     await nextTick()
     reset()
@@ -446,15 +455,6 @@ function triggerBossEncounter() {
     level: level.value,
     coins: currentCoins.value,
   })
-}
-
-function triggerGameOver() {
-  pause()
-  showGameOverOverlay.value = true
-  clearTimeout(failureTimer)
-  failureTimer = setTimeout(() => {
-    emit('gameOver')
-  }, 6200)
 }
 
 /* ─── floating effects watch ─────────────────────────────── */
@@ -1235,4 +1235,3 @@ button { cursor: pointer; font: inherit; border-radius: 999px; }
   .info-grid { grid-template-columns: 1fr 1fr; }
 }
 </style>
-

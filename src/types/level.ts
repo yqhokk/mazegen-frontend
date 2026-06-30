@@ -53,6 +53,13 @@ export interface Position {
   y: number
 }
 
+/**
+ * 后端路径坐标元组。
+ *
+ * 当前 OpenAPI 中路径类字段使用 [row, col]，前端渲染仍统一使用 Position。
+ */
+export type GridCoord = [number, number]
+
 /* =========================
    资源
 ========================= */
@@ -343,7 +350,7 @@ export interface RuntimePlayerState {
   clearedBoss: boolean
 
   /** 已访问路径 */
-  visited: Position[]
+  visited: GridCoord[]
 }
 
 /* =========================
@@ -427,7 +434,7 @@ export interface AgentRuntimeState {
    * 前端渲染时应显示为普通地面，
    * 避免重复触发。
    */
-  consumedCells: Position[]
+  consumedCells: GridCoord[]
 
   /**
    * limited_view_3x3 模式下的可见区域
@@ -479,6 +486,9 @@ export interface PlanBossFightResponse {
 
   /** 最优技能释放序列 */
   optimalSequence: SkillAction[]
+
+  /** 技能下标序列 */
+  skillSequence: number[]
 
   /** 推荐限定回合数 */
   turnLimit: number

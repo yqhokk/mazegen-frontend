@@ -27,7 +27,6 @@ const levelRequest = ref<GenerateLevelRequest>({
     trapRatio: 0.15,
     coinValue: 50,
     trapValue: -30,
-    difficulty: 'normal',
   },
   bossConfig: {
     bossCount: 3,
